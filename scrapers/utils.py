@@ -1,3 +1,10 @@
+# Spec extraction yardımcı fonksiyonları.
+# extract_specs_from_list  → listing sayfasındaki bileşen metni listesinden spec çıkarır
+# extract_specs_from_name  → ürün adı veya URL slug'ından regex ile spec çıkarır
+# extract_specs_from_table → <th>Etiket</th><td>Değer</td> tablolarından spec çıkarır
+# extract_specs_from_attributes → WooCommerce shop_attributes tablosundan spec çıkarır
+# merge_specs              → base dict'teki N/A alanlarını extra dict'ten doldurur
+# load/save_detail_cache   → detay sayfası spec'lerini URL bazlı önbellekler
 
 import re
 import os
@@ -21,26 +28,20 @@ _TR_MAP = str.maketrans({
 
 
 def _norm(s: str) -> str:
-    """Lowercase + fold Turkish characters so ASCII keywords match reliably."""
+    # Türkçe karakterleri ASCII'ye fold eder; keyword eşleşmeleri için
     if not s:
         return ""
     return s.translate(_TR_MAP).lower()
 
 
-# Keywords that must match as a full word (no trailing letters). Used for short
-# ambiguous tokens like "arc" (GPU family) so they don't fire on "arctic".
+# "arc", "aio" gibi kısa token'lar tam kelime olarak eşleşmeli; "arctic" gibi yanlış ateşlemesini önler
 _EXACT = {"arc", "aio", "psu", "cpu", "case"}
 
 
 def _has_word(text: str, kw: str) -> bool:
-    """Keyword match on already-normalized text.
-
-    A leading boundary stops false positives such as ``mb`` matching ``96mb`` or
-    ``mhz`` matching ``8400mhz``. Trailing letters are allowed by default so
-    Turkish suffixes still match (``kasa`` → ``kasasi``, ``sogutucu`` →
-    ``sogutucusu``, ``anakart`` → ``anakarti``). Keywords in ``_EXACT`` require a
-    full boundary on both sides.
-    """
+    # Normalize edilmiş metin üzerinde keyword eşleşmesi.
+    # Türkçe ekler için trailing boundary gevşek tutulur (kasa → kasası eşleşir).
+    # _EXACT listesindekiler her iki taraftan da sınır ister.
     tail = r"(?![a-z0-9])" if kw in _EXACT else r"(?![0-9])"
     return re.search(r"(?<![a-z0-9])" + re.escape(kw) + tail, text) is not None
 
@@ -49,19 +50,14 @@ def _has_any(text: str, kws) -> bool:
     return any(_has_word(text, kw) for kw in kws)
 
 
-# Ordered so that ambiguous items land in the right bucket. Each rule:
-#   (category, positive keywords, negative keywords, extra regex or None)
-# The first category whose keywords match (and none of whose negatives match)
-# claims the item. Order matters: e.g. a CPU cooler string contains "islemci"
-# so Cooler must be tried before CPU; a RAM stick advertised as "sogutuculu"
-# (with heatsink) must be tried before Cooler.
+# Kurallar sırayla denenir; ilk eşleşen kategori kazanır.
+# Sıra önemli: Cooler CPU'dan, Case PSU/Cooler'dan önce gelmeli.
 _RULES = [
     ("GPU", ["ekran karti", "ekran kart", "geforce", "radeon", "grafik islemci", "arc"],
      [], r"(?<![a-z0-9])(rtx|gtx)\s?\d{3,4}|(?<![a-z0-9])rx\s?\d{3,4}"),
     ("Motherboard", ["anakart", "motherboard", "mainboard"], ["ekran"],
      r"(?<![a-z0-9])[abhxz]\d{3}[a-z]{0,2}(?![a-z0-9])"),
-    # Case comes before PSU/Cooler: many cases bundle a PSU ("650W 80Plus ... Kasa")
-    # or carry the "Cooler Master" brand, and the item is fundamentally the case.
+    # Case; PSU/Cooler'dan önce: bazı kasalar PSU veya "Cooler Master" içerir
     ("Case", ["kasa", "case", "tower", "kabin"], [], None),
     ("PSU", ["guc kaynagi", "power supply", "psu"], [],
      r"(?<![a-z0-9])(80\s?\+|80\s?plus)"),
@@ -78,7 +74,7 @@ _RULES = [
 
 
 def _classify(item: str) -> str | None:
-    """Return the single spec category an item belongs to, or None."""
+    # Bir bileşen metninin hangi spec kategorisine girdiğini döner
     n = _norm(item)
     if not n:
         return None
@@ -91,9 +87,7 @@ def _classify(item: str) -> str | None:
 
 
 def _psu_from_text(items: list[str]) -> str | None:
-    """Pull a bundled PSU rating (e.g. "650W 80+") out of any item — used when a
-    case ships with an integrated power supply and there is no separate PSU line.
-    """
+    # Kasayla gelen entegre PSU'yu yakalar ("650W 80+ ... Kasa" gibi)
     for it in items:
         n = _norm(it)
         rated = re.search(r"80\s?\+|80\s?plus", n)
@@ -112,11 +106,7 @@ def _psu_from_text(items: list[str]) -> str | None:
 
 
 def extract_specs_from_list(spec_items: list[str]) -> dict:
-    """Extract structured PC specifications from a list of component strings.
-
-    Each item is assigned to exactly one category (the first item wins per
-    category), which avoids one string leaking into several fields.
-    """
+    # Bileşen metni listesinden spec çıkarır; her kategori ilk eşleşeni alır
     specs = dict(EMPTY_SPECS)
     if not spec_items:
         return specs
@@ -138,10 +128,7 @@ def extract_specs_from_list(spec_items: list[str]) -> dict:
 
 
 def extract_specs_from_attributes(attrs: dict) -> dict:
-    """Map a label->value attribute table (e.g. WooCommerce ``shop_attributes``)
-    onto spec fields. Only fills fields that have a matching labelled attribute;
-    everything else stays ``N/A``.
-    """
+    # WooCommerce shop_attributes tablosunu spec alanlarına map eder
     specs = dict(EMPTY_SPECS)
     if not attrs:
         return specs
@@ -188,7 +175,7 @@ def extract_specs_from_attributes(attrs: dict) -> dict:
 
 
 def merge_specs(base: dict, extra: dict) -> dict:
-    """Fill ``N/A`` fields in ``base`` from ``extra`` (in place)."""
+    # base'deki N/A alanlarını extra'dan doldurur (in-place)
     for k in EMPTY_SPECS:
         if base.get(k, "N/A") in (None, "", "N/A") and extra.get(k, "N/A") not in (None, "", "N/A"):
             base[k] = extra[k]
@@ -215,7 +202,7 @@ _SUB_ATTR = ("hizi", "hiz", "hafizasi", "hafiza", "bellek tipi", "bellek arayuzu
 
 
 def _label_to_category(label: str) -> str | None:
-    """Map a Turkish/English spec-table label to a spec category, or None."""
+    # Türkçe/İngilizce spec tablosu etiketini spec kategorisine map eder
     n = _norm(label)
     if not n:
         return None
@@ -227,14 +214,8 @@ def _label_to_category(label: str) -> str | None:
 
 
 def extract_specs_from_table(rows: list[tuple[str, str]]) -> dict:
-    """Extract specs from a label→value table.
-
-    Used for detail pages whose spec list is a 2-column table
-    (``<th>İşlemci</th><td>AMD Ryzen 5 7500F</td>``) or a single-column
-    "Label: Value" cell list (gamegaraj).  Skips secondary labels such as
-    "İşlemci Hızı", "Ekran Kartı Hafızası" because they are sub-attributes
-    that would overwrite the primary component field.
-    """
+    # <th>Etiket</th><td>Değer</td> tablosundan spec çıkarır.
+    # "İşlemci Hızı", "Ekran Kartı Hafızası" gibi alt-attribute'lar atlanır.
     specs = dict(EMPTY_SPECS)
     if not rows:
         return specs
@@ -253,20 +234,17 @@ def extract_specs_from_table(rows: list[tuple[str, str]]) -> dict:
     return specs
 
 
-# ── Detail-page cache ─────────────────────────────────────────────────────────
-# Product detail pages (Case/PSU/Cooler for tebilon, PSU/Cooler for gamingGen)
-# are the slow part of scraping because the source sites rate-limit. The specs on
-# those pages are stable per product URL, while price/stock come fresh from the
-# listing page — so caching detail-derived specs by URL makes re-runs near
-# instant. Delete the cache file (or set SCRAPER_NO_CACHE=1) to force a full
-# refetch.
+# Detay sayfası önbelleği.
+# Tebilon/GamingGen gibi sitelerde detay sayfaları rate-limit'e takılır.
+# Spec'ler URL başına kararlıdır; önbellekle ikinci çalıştırma çok daha hızlı olur.
+# Sıfırlamak için dosyayı sil ya da SCRAPER_NO_CACHE=1 set et.
 
 _CACHE_PATH = os.path.join(os.path.dirname(__file__), "..", ".detail_cache.json")
 _CACHE_DISABLED = os.environ.get("SCRAPER_NO_CACHE") == "1"
 
 
 def load_detail_cache() -> dict:
-    """Return the persisted url -> {spec: value} cache (empty if disabled/missing)."""
+    # Diske kaydedilmiş url → {spec: değer} önbelleğini döner
     if _CACHE_DISABLED:
         return {}
     try:
@@ -278,8 +256,7 @@ def load_detail_cache() -> dict:
 
 
 def save_detail_cache(cache: dict) -> None:
-    """Persist the cache, merging with whatever is on disk. Merging keeps entries
-    written by another store that scrapes concurrently into the same file."""
+    # Önbelleği diske yazar; aynı anda çalışan başka scraper'ın yazdıklarını korumak için merge eder
     if _CACHE_DISABLED or not cache:
         return
     merged = load_detail_cache()
@@ -292,7 +269,7 @@ def save_detail_cache(cache: dict) -> None:
 
 
 def cacheable_specs(specs: dict) -> dict:
-    """Keep only the resolved (non-N/A) fields worth caching."""
+    # Önbelleklemeye değer (N/A olmayan) alanları döner
     return {k: v for k, v in specs.items()
             if k in EMPTY_SPECS and v not in (None, "", "N/A")}
 
@@ -302,28 +279,22 @@ def _clean(s: str) -> str:
 
 
 def extract_specs_from_name(name: str) -> dict:
-    """Extract structured PC specs from a product name or URL slug.
-
-    Handles hyphens, underscores, slashes and other separators common in URL
-    slugs (``phoenix-9060xt-amd-ryzen-5-7500f-...``) by normalising them to
-    spaces before pattern matching.  Returns the best-effort spec fields;
-    anything not found stays ``"N/A"``.
-    """
+    # Ürün adı veya URL slug'ından regex ile spec çıkarır.
+    # Slug'lardaki tire/alt çizgi/eğik çizgi boşluğa normalize edilir.
+    # Bulunamayan her alan "N/A" kalır.
     specs = dict(EMPTY_SPECS)
     if not name:
         return specs
 
-    # Normalise separators → spaces (case preserved for display)
+    # Ayraçları boşluğa çevir
     text = re.sub(r"[-_/]+", " ", name)
     text = re.sub(r"\s+", " ", text).strip()
-    # Split merged patterns common in URL slugs: "ddr4500gb" → "ddr4 500gb",
-    # "8gb16gb" → "8gb 16gb"  (missing hyphens in some itopya slugs)
+    # Birleşik slug pattern'leri ayır: "ddr4500gb" → "ddr4 500gb"
     text = re.sub(r"(ddr[45])(\d)", r"\1 \2", text, flags=re.IGNORECASE)
     text = re.sub(r"(\dgb)(\d)", r"\1 \2", text, flags=re.IGNORECASE)
-    n = _norm(text)  # Turkish-folded lowercase for keyword matching
+    n = _norm(text)
 
-    # ── GPU ──────────────────────────────────────────────────────────────────
-    # Radeon RX 9060 XT 8GB · GeForce RTX 4060 Ti · RTX 5060 · RX 7600 · GTX 1650 · Arc A750 · GT 730
+    # GPU — RTX/GTX/RX/Arc/GT serisi
     gpu_m = re.search(
         r"\b((?:radeon\s+|geforce\s+)?(?:rtx|gtx|rx|arc\s+a|gt)\s*\d{3,4}\s*"
         r"(?:ti|xt|super)?(?:\s*\d+\s*gb?)?)",
@@ -331,14 +302,13 @@ def extract_specs_from_name(name: str) -> dict:
     if gpu_m:
         specs["GPU"] = _clean(gpu_m.group(1))
 
-    # ── CPU ──────────────────────────────────────────────────────────────────
+    # CPU — Ryzen/Intel pattern'leri öncelik sırasıyla denenir
     cpu_patterns = [
-        r"(?:amd\s+)?ryzen\s+(?:\d\s+)?\d{3,5}\w*",     # AMD Ryzen 5 7500F · Ryzen 5500
-        r"(?:amd\s+)?r[3579]\s+\d{3,5}\w*",              # AMD R5 7500F · R7 5700
-        r"intel\s+(?:core\s+)?ultra\s+\d\s+\d{3,5}\w*",  # Intel Core Ultra 5 225F
-        r"intel\s+(?:core\s+)?[iu][3579]\s+\d{3,5}\w*",  # Intel Core i5 12600KF · Intel i5 12400
-        r"intel\s+(?:core\s+)?\d{3,5}\w*",                # Intel Core 12100
-        # AMD bare model (when "Ryzen"/"R7" prefix is dropped): "AMD 7700X" · "AMD 5500"
+        r"(?:amd\s+)?ryzen\s+(?:\d\s+)?\d{3,5}\w*",
+        r"(?:amd\s+)?r[3579]\s+\d{3,5}\w*",
+        r"intel\s+(?:core\s+)?ultra\s+\d\s+\d{3,5}\w*",
+        r"intel\s+(?:core\s+)?[iu][3579]\s+\d{3,5}\w*",
+        r"intel\s+(?:core\s+)?\d{3,5}\w*",
         r"amd\s+\d{3,5}\w*",
     ]
     for pat in cpu_patterns:
@@ -347,29 +317,23 @@ def extract_specs_from_name(name: str) -> dict:
             specs["CPU"] = _clean(cpu_m.group(0))
             break
 
-    # ── Motherboard (chipset) ────────────────────────────────────────────────
-    # A620M · H610M · B840M · X670E · Z790 · A520 · H810M …
+    # Motherboard — A620M, B650M, Z790 gibi chipset kodları
     for mb_m in re.finditer(r"\b([abhxz]\d{3}[a-z]{0,2})\b", text, re.IGNORECASE):
-        start = mb_m.start()
+        start  = mb_m.start()
         before = _norm(text[max(0, start - 5):start])
-        if "arc" in before:          # "Arc A750" is a GPU, not a chipset
+        if "arc" in before:  # "Arc A750" GPU, chipset değil
             continue
         specs["Motherboard"] = mb_m.group(1)
         break
 
-    # ── RAM ──────────────────────────────────────────────────────────────────
-    # 16GB DDR5 · 8GB DDR4 · 32GB RAM · 16GB Bellek · DDR5 32GB (DDR prefix)
-    # Requires a DDR/RAM/Bellek keyword so storage capacities ("500GB SSD") are
-    # not picked up as RAM.
+    # RAM — DDR/RAM/Bellek keyword'u şart; yoksa storage kapasitesi yanlış eşleşir
     ram_m = (re.search(r"(\d+\s*gb\s*(?:ddr[45]|ram|bellek))", text, re.IGNORECASE)
              or re.search(r"((?:ddr[45])\s*\d+\s*gb)", text, re.IGNORECASE))
     if ram_m:
         specs["RAM"] = _clean(ram_m.group(1))
 
-    # ── Storage ──────────────────────────────────────────────────────────────
-    # 500GB NVMe M.2 SSD · 1TB SSD · 512GB M.2 SSD · 240GB SSD · 500GB (bare)
-    # Exclude capacities that are part of GPU (VRAM) or RAM (DDR/Bellek) matches,
-    # and prefer candidates that carry a storage keyword (SSD/HDD/NVMe/M.2).
+    # Storage — GPU VRAM ve RAM aralıklarını hariç tutar;
+    # storage keyword (ssd/nvme/m.2/hdd) varsa önceliklendirir
     _exclude = []
     if gpu_m:
         _exclude.append(gpu_m.span())
@@ -385,13 +349,12 @@ def extract_specs_from_name(name: str) -> dict:
         if any(s < e2 and s2 < e for s2, e2 in _exclude):
             continue
         has_kw = bool(re.search(r"(?:nvme|m\.?\s*2|ssd|hdd|sata)", sm.group(0), re.IGNORECASE))
-        # VRAM korumasi: GPU'dan hemen sonra gelen kucuk (<32GB) birimsiz
-        # kapasite VRAM'dir ("RTX 3050 ... 6gb"), depolama degil.
+        # VRAM koruması: GPU'dan hemen sonra gelen ≤32GB birimsiz kapasite VRAM'dir
         if not has_kw and gpu_end >= 0 and gpu_end <= s <= gpu_end + 30:
             num = re.search(r"\d+", sm.group(0))
             if num and int(num.group(0)) <= 32:
                 continue
-        # For bare capacities (no storage keyword), skip if followed by DDR/RAM
+        # Keyword'suz kapasitelerin ardından DDR/RAM geliyorsa bu RAM'dir, storage değil
         if not has_kw:
             tail = _norm(text[e:e + 12])
             if "ddr" in tail or "ram" in tail or "bellek" in tail:
@@ -404,43 +367,40 @@ def extract_specs_from_name(name: str) -> dict:
         if with_kw:
             chosen = with_kw[0]
         else:
-            # No storage keyword anywhere — prefer TB over GB (RAM is never TB)
-            # so "1tb 32gb" → Storage="1tb", RAM stays separate.
+            # Storage keyword yok — TB'yi GB'ye tercih et (RAM hiçbir zaman TB olmaz)
             tb = [c for c in storage_candidates
                   if re.search(r"\d+\s*tb", c.group(0), re.IGNORECASE)]
             chosen = tb[0] if tb else storage_candidates[0]
         specs["Storage"] = _clean(chosen.group(0))
 
-    # ── Case ─────────────────────────────────────────────────────────────────
+    # Case
     for kw in ("kasa", "case", "tower", "kabin", "chassis"):
         idx = n.find(kw)
         if idx >= 0:
             start = max(0, idx - 20)
-            end = min(len(text), idx + len(kw) + 25)
+            end   = min(len(text), idx + len(kw) + 25)
             specs["Case"] = _clean(text[start:end])[:50]
             break
 
-    # ── PSU ──────────────────────────────────────────────────────────────────
+    # PSU
     psu_watt_m = re.search(r"(\d{3,4})\s*w(?:att)?(?![a-z])", text, re.IGNORECASE)
     if psu_watt_m:
-        watt = psu_watt_m.group(1)
+        watt   = psu_watt_m.group(1)
         plus_m = re.search(
             r"(80\s*\+\s*(?:bronze|gold|silver|platinum|titanium)?"
             r"|80\s*plus\s*(?:bronze|gold|silver|platinum|titanium)?)",
             text, re.IGNORECASE)
         specs["PSU"] = f"{watt}W 80+" if plus_m else f"{watt}W"
 
-    # ── Cooler ───────────────────────────────────────────────────────────────
+    # Cooler — "BOX" işlemci kutulu gelir, stok soğutucu dahildir
     for kw in ("sogutucu", "sogutma", "sivi sogutma", "cooler", "aio", "liquid"):
         idx = n.find(kw)
         if idx >= 0:
             start = max(0, idx - 20)
-            end = min(len(text), idx + len(kw) + 25)
+            end   = min(len(text), idx + len(kw) + 25)
             specs["Cooler"] = _clean(text[start:end])[:50]
             break
     else:
-        # BOX (kutulu) islemci perakende kutusuyla gelir: stok sogutucu dahildir.
-        # TRAY/MPK icin tersi soylenemez (hazir sistemde sogutucu takilidir).
         if re.search(r"(?<![a-z0-9])box(?![a-z0-9])", n):
             specs["Cooler"] = "Stok Soğutucu"
 

@@ -1,8 +1,7 @@
-"""
-Sinerji scraper — Fetcher (static HTML).
-Detail page fetch eklenmistir: listing'de olmayan Motherboard/Case/PSU/Cooler
-detay sayfasindan cekilir.  Hiz icin cache kullanilir.
-"""
+# Sinerji — OEM paket listesi + detay sayfası çeker.
+# Listing'de olmayan Motherboard/Case/PSU/Cooler bilgileri detay sayfasından alınır.
+# Detay sayfaları önbelleğe alınır; ikinci çalıştırmada ağa gidilmez.
+
 import re
 import asyncio
 from scrapling import Fetcher
@@ -16,9 +15,9 @@ from .utils import (
     save_detail_cache,
 )
 
-STORE = "sinerji"
+STORE    = "sinerji"
 BASE_URL = "https://www.sinerji.gen.tr/oyun-icin-oem-paketler-c-2202"
-SITE = "https://www.sinerji.gen.tr"
+SITE     = "https://www.sinerji.gen.tr"
 
 
 def _parse_price(el) -> float:
@@ -26,7 +25,7 @@ def _parse_price(el) -> float:
     if not price_el:
         return 0.0
     texts = [t.get().strip() for t in price_el.xpath(".//text()") if t.get().strip()]
-    raw = "".join(texts)
+    raw   = "".join(texts)
     clean = re.sub(r"[^\d,]", "", raw).replace(",", ".")
     try:
         return float(clean)
@@ -38,19 +37,19 @@ def _parse_page_products(page) -> list[dict]:
     products = []
     for el in page.css(".product"):
         name_el = el.css(".titleShort").first or el.css(".title a").first
-        name = name_el.get_all_text().strip() if name_el else "N/A"
+        name    = name_el.get_all_text().strip() if name_el else "N/A"
 
         link_el = el.css(".title a").first
-        link = link_el.attrib.get("href") if link_el else None
+        link    = link_el.attrib.get("href") if link_el else None
         if link and not link.startswith("http"):
             link = f"{SITE}{link}" if link.startswith("/") else f"{SITE}/{link}"
 
-        price = _parse_price(el)
+        price  = _parse_price(el)
         img_el = el.css(".img img").first
-        image = img_el.attrib.get("src") if img_el else None
+        image  = img_el.attrib.get("src") if img_el else None
 
         spec_items = [s.get_all_text().strip() for s in el.css(".technicalSpecsWithLogo")]
-        specs = extract_specs_from_list(spec_items)
+        specs      = extract_specs_from_list(spec_items)
 
         if name:
             name_specs = extract_specs_from_name(f"{name} {link}")
@@ -58,15 +57,11 @@ def _parse_page_products(page) -> list[dict]:
                 if v == "N/A" and name_specs.get(k) != "N/A":
                     specs[k] = name_specs[k]
 
-        products.append({
-            "name": name, "price": price, "image": image,
-            "url": link, "store": STORE, "specs": specs,
-        })
+        products.append({"name": name, "price": price, "image": image, "url": link, "store": STORE, "specs": specs})
     return products
 
 
 def _parse_detail_rows(page) -> list[tuple[str, str]]:
-    """sinerji detail: <tr><th>Label</th><td>Value</td></tr>."""
     rows = []
     if not page:
         return rows
@@ -87,7 +82,6 @@ async def _fetch_product_details(product: dict, fetcher, cache=None) -> dict:
     url = product.get("url")
     if not url:
         return product
-
     if cache is not None and url in cache:
         merge_specs(specs, cache[url])
         return product
@@ -117,22 +111,22 @@ async def _fetch_product_details(product: dict, fetcher, cache=None) -> dict:
 
 
 async def scrape_all_pages_async() -> list[dict]:
-    print(f"[Sinerji] Fetching {BASE_URL}", flush=True)
+    print(f"[Sinerji] Çekiliyor: {BASE_URL}", flush=True)
     fetcher = Fetcher()
 
     def fetch_sync(url):
         try:
             return fetcher.get(url)
         except Exception as e:
-            print(f"[Sinerji] Fetch hatasi: {e}", flush=True)
+            print(f"[Sinerji] Hata: {e}", flush=True)
             return None
 
     all_products: list[dict] = []
-    seen_urls: set[str] = set()
+    seen_urls:    set[str]   = set()
     page_num = 1
 
     while True:
-        url = f"{BASE_URL}?px={page_num}" if page_num > 1 else BASE_URL
+        url  = f"{BASE_URL}?px={page_num}" if page_num > 1 else BASE_URL
         page = await asyncio.to_thread(fetch_sync, url)
         if not page:
             break
@@ -145,19 +139,17 @@ async def scrape_all_pages_async() -> list[dict]:
                 seen_urls.add(p["url"])
                 all_products.append(p)
                 new += 1
-        print(f"[Sinerji] Sayfa {page_num}: {new} yeni urun", flush=True)
+        print(f"[Sinerji] Sayfa {page_num}: {new} ürün", flush=True)
         if new == 0:
             break
         page_num += 1
 
-    cache = load_detail_cache()
-    cached = sum(1 for p in all_products if p.get("url") in cache)
+    cache   = load_detail_cache()
+    cached  = sum(1 for p in all_products if p.get("url") in cache)
     missing = sum(1 for p in all_products
-                  if any(p["specs"].get(k) == "N/A"
-                         for k in ("Motherboard", "Case", "PSU", "Cooler"))
+                  if any(p["specs"].get(k) == "N/A" for k in ("Motherboard", "Case", "PSU", "Cooler"))
                   and p.get("url") not in cache)
-    print(f"[Sinerji] {len(all_products)} urun · {cached} onbellekten · "
-          f"{missing} icin detay cekiliyor...", flush=True)
+    print(f"[Sinerji] {len(all_products)} ürün · {cached} önbellekte · {missing} için detay çekiliyor", flush=True)
 
     sem = asyncio.Semaphore(8)
 
@@ -171,8 +163,7 @@ async def scrape_all_pages_async() -> list[dict]:
 
     all_products = await asyncio.gather(*[fetch_detail_with_sem(p) for p in all_products])
     save_detail_cache(cache)
-
-    print(f"[Sinerji] Toplam {len(all_products)} urun cekildi", flush=True)
+    print(f"[Sinerji] Tamamlandı — {len(all_products)} ürün", flush=True)
     return all_products
 
 
@@ -183,4 +174,4 @@ def scrape_all_pages() -> list[dict]:
 if __name__ == "__main__":
     import json
     products = scrape_all_pages()
-    print(f"Bitti: {len(products)} urun.")
+    print(f"Toplam: {len(products)} ürün")

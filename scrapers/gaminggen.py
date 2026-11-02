@@ -1,3 +1,7 @@
+# GamingGen — OEM hazır sistem listesi + detay sayfası çeker.
+# PSU/Cooler bilgileri WooCommerce attribute tablosundan, Case ise
+# "beta-parts-parts-table" bileşen listesinden alınır.
+
 import re
 import asyncio
 from scrapling import Fetcher
@@ -11,8 +15,9 @@ from .utils import (
     load_detail_cache,
     save_detail_cache,
 )
-STORE = "gamingGen"
-BASE_URL = "https://www.gaming.gen.tr/kategori/hazir-sistemler/"
+
+STORE       = "gamingGen"
+BASE_URL    = "https://www.gaming.gen.tr/kategori/hazir-sistemler/"
 PRODUCT_SEL = "li.product"
 
 
@@ -24,16 +29,15 @@ def _extract_price(item) -> float:
     price_el = item.css(".price").first
     if not price_el:
         return 0.0
-    ins_el = price_el.css("ins").first
-    target = ins_el if ins_el else price_el
-    bdi_el = target.css("bdi").first
-    raw_el = bdi_el if bdi_el else target
+    ins_el  = price_el.css("ins").first
+    target  = ins_el if ins_el else price_el
+    bdi_el  = target.css("bdi").first
+    raw_el  = bdi_el if bdi_el else target
     try:
         price_text = raw_el.get_all_text() if hasattr(raw_el, "get_all_text") else raw_el.text
     except Exception:
         price_text = ""
-    cleaned = re.sub(r"[^\d,]", "", price_text)
-    cleaned = cleaned.replace(",", ".")
+    cleaned = re.sub(r"[^\d,]", "", price_text).replace(",", ".")
     try:
         return float(cleaned) if cleaned else 0.0
     except ValueError:
@@ -46,13 +50,12 @@ def _parse_page_products(page) -> list[dict]:
         return products
     for item in page.css(PRODUCT_SEL):
         title_el = item.css(".pc-specs-title").first
-        name = _normalize(title_el.text) if title_el else "N/A"
-        a_el = item.css("a").first
-        link = a_el.attrib.get("href") if a_el else None
-        # Listing card'inda birden fazla img var: ilki "secondary-image" (ekran
-        # kartı gibi hover görseli), asıl ürün görseli lazy-load edilir ve
-        # `attachment-woocommerce_thumbnail` class'ındadır.  Bu class yoksa
-        # "secondary-image" OLMAYAN ilk img'i kullan.
+        name     = _normalize(title_el.text) if title_el else "N/A"
+        a_el     = item.css("a").first
+        link     = a_el.attrib.get("href") if a_el else None
+
+        # Listing'de birden fazla img var. "attachment-woocommerce_thumbnail" öncelikli,
+        # yoksa "secondary-image" olmayan ilk img'e bak.
         image = None
         thumb = item.css("img.attachment-woocommerce_thumbnail").first
         if thumb:
@@ -73,16 +76,15 @@ def _parse_page_products(page) -> list[dict]:
                         break
                 if image:
                     break
-            if not image:
-                noscript_img = item.css("noscript img").first
-                if noscript_img:
-                    image = noscript_img.attrib.get("src")
-        price = _extract_price(item)
-        spec_items = [
-            _normalize(li.get_all_text() if hasattr(li, "get_all_text") else li.text)
-            for li in item.css(".pc-specs-list li")
-        ]
-        specs = extract_specs_from_list(spec_items)
+        if not image:
+            noscript_img = item.css("noscript img").first
+            if noscript_img:
+                image = noscript_img.attrib.get("src")
+
+        price      = _extract_price(item)
+        spec_items = [_normalize(li.get_all_text() if hasattr(li, "get_all_text") else li.text)
+                      for li in item.css(".pc-specs-list li")]
+        specs      = extract_specs_from_list(spec_items)
 
         if name:
             name_specs = extract_specs_from_name(name)
@@ -95,8 +97,6 @@ def _parse_page_products(page) -> list[dict]:
 
 
 def _parse_detail_attrs(page) -> dict:
-    """Read the product detail attribute table (PSU/Cooler specs live here, not on
-    the listing card).  Returns label→value dict for ``extract_specs_from_attributes``."""
     if not page:
         return {}
     attrs = {}
@@ -113,29 +113,21 @@ def _parse_detail_attrs(page) -> dict:
 
 
 def _parse_detail_parts(page) -> list[str]:
-    """Read the ``beta-parts-parts-table`` on the detail page.
-
-    This table lists each installed component as a single cell (no label):
-    "AMD Ryzen 7 7800X3D ...", "HYTE X50 ... Gaming Kasa ...", etc.  These
-    strings are exactly what ``extract_specs_from_list`` classifies, and they
-    are the **only** place where the Case name appears on gaming.gen.tr.
-    """
+    # beta-parts-parts-table: her satır bir bileşen metni içerir.
+    # Case bilgisi yalnızca bu tabloda yer alır.
     items = []
     if not page:
         return items
     tbl = page.css("table.beta-parts-parts-table").first
     if not tbl:
         return items
+    skip = ("Standart Montaj", "VIP Hizmet", "Standart Kablolama", "Standart Ayar", "Hızlı Montaj")
     for row in tbl.css("tr"):
         tds = row.css("td")
         if not tds:
             continue
-        # The component text is in the last td of each row.
         txt = (tds[-1].get_all_text() if hasattr(tds[-1], "get_all_text") else tds[-1].text or "").strip()
-        # Skip service/up-sell rows (Standart Montaj, VIP Hizmet, Kablolama, Ayar)
-        if txt and not any(skip in txt for skip in
-                           ("Standart Montaj", "VIP Hizmet", "Standart Kablolama",
-                            "Standart Ayar", "Hızlı Montaj")):
+        if txt and not any(s in txt for s in skip):
             items.append(" ".join(txt.split()))
     return items
 
@@ -147,8 +139,6 @@ async def _fetch_product_details(product: dict, fetcher_instance, cache=None) ->
     url = product.get("url")
     if not url:
         return product
-
-    # Cached detail specs for this URL — skip the network round-trip.
     if cache is not None and url in cache:
         merge_specs(product["specs"], cache[url])
         return product
@@ -168,11 +158,9 @@ async def _fetch_product_details(product: dict, fetcher_instance, cache=None) ->
             await asyncio.sleep(4 + attempt * 4)
             continue
         detail_specs = dict(EMPTY_SPECS)
-        # 1) Attribute table → PSU/Cooler/MB/RAM/Storage values
         attrs = _parse_detail_attrs(page)
         if attrs:
             merge_specs(detail_specs, extract_specs_from_attributes(attrs))
-        # 2) Parts table → component list (Case lives here, also reinforces others)
         parts = _parse_detail_parts(page)
         if parts:
             merge_specs(detail_specs, extract_specs_from_list(parts))
@@ -184,63 +172,58 @@ async def _fetch_product_details(product: dict, fetcher_instance, cache=None) ->
 
 
 async def scrape_all_pages_async() -> list[dict]:
-    print(f"[GamingGen] Ilk sayfa: {BASE_URL}", flush=True)
+    print(f"[GamingGen] Çekiliyor: {BASE_URL}", flush=True)
     fetcher = Fetcher()
 
     def fetch_sync(url):
         try:
             return fetcher.get(url)
         except Exception as e:
-            print(f"[GamingGen] Fetch hatasi: {e}", flush=True)
+            print(f"[GamingGen] Hata: {e}", flush=True)
             return None
 
     first_page = await asyncio.to_thread(fetch_sync, BASE_URL)
     if not first_page:
-        print("[GamingGen] Ilk sayfa hatasi", flush=True)
+        print("[GamingGen] İlk sayfa çekilemedi", flush=True)
         return []
 
     all_products = _parse_page_products(first_page)
-    seen_urls = {p["url"] for p in all_products if p.get("url")}
-    print(f"[GamingGen] Sayfa 1: {len(all_products)} urun", flush=True)
-    
+    seen_urls    = {p["url"] for p in all_products if p.get("url")}
+    print(f"[GamingGen] Sayfa 1: {len(all_products)} ürün", flush=True)
+
     page_num = 2
     while True:
-        url = f"{BASE_URL}page/{page_num}/"
         batch = []
         for attempt in range(3):
             try:
-                page = await asyncio.to_thread(fetch_sync, url)
+                page  = await asyncio.to_thread(fetch_sync, f"{BASE_URL}page/{page_num}/")
                 batch = _parse_page_products(page)
                 if batch:
                     break
             except Exception as e:
                 print(f"[GamingGen] Sayfa {page_num} hata (deneme {attempt+1}): {e}", flush=True)
                 await asyncio.sleep(2)
-                
         if not batch:
             break
-            
         new_count = 0
         for p in batch:
             if p["url"] and p["url"] not in seen_urls:
                 seen_urls.add(p["url"])
                 all_products.append(p)
                 new_count += 1
-                
-        print(f"[GamingGen] Sayfa {page_num}: {new_count} yeni urun", flush=True)
+        print(f"[GamingGen] Sayfa {page_num}: {new_count} ürün", flush=True)
         if new_count == 0:
             break
-            
         page_num += 1
 
-    cache = load_detail_cache()
+    cache  = load_detail_cache()
     cached = sum(1 for p in all_products if p.get("url") in cache)
-    print(f"[GamingGen] {len(all_products)} urun icin detay cekiliyor "
-          f"(PSU/Sogutucu, {cached} onbellekten)...", flush=True)
-    detail_sem = asyncio.Semaphore(12)
+    print(f"[GamingGen] {len(all_products)} ürün için detay çekiliyor ({cached} önbellekte)...", flush=True)
+
+    sem = asyncio.Semaphore(12)
 
     async def fetch_detail_with_sem(prod):
-        async with detail_sem:
+        async with sem:
             was_cached = prod.get("url") in cache
             res = await _fetch_product_details(prod, fetcher, cache)
             if not was_cached:
@@ -249,8 +232,7 @@ async def scrape_all_pages_async() -> list[dict]:
 
     all_products = await asyncio.gather(*[fetch_detail_with_sem(p) for p in all_products])
     save_detail_cache(cache)
-
-    print(f"[GamingGen] Toplam {len(all_products)} urun", flush=True)
+    print(f"[GamingGen] Tamamlandı — {len(all_products)} ürün", flush=True)
     return all_products
 
 
@@ -261,7 +243,4 @@ def scrape_all_pages() -> list[dict]:
 if __name__ == "__main__":
     import json
     products = scrape_all_pages()
-    print(f"Bitti: {len(products)} urun.")
-
-
-
+    print(f"Toplam: {len(products)} ürün")

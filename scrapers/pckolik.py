@@ -1,3 +1,7 @@
+# PCKolik — OEM paket listesi + detay sayfası çeker.
+# Listing'deki görseller bileşen görselleri; gerçek sistem/kasa görseli
+# detay sayfasında .case-img-crop img içinde bulunur.
+
 import re
 import asyncio
 from scrapling import Fetcher
@@ -10,38 +14,31 @@ from .utils import (
     save_detail_cache,
 )
 
-STORE = "pckolik"
-BASE_URL = "https://pckolik.com.tr/kategori/oem-paketler"
-SITE_BASE = "https://pckolik.com.tr"
+STORE       = "pckolik"
+BASE_URL    = "https://pckolik.com.tr/kategori/oem-paketler"
+SITE_BASE   = "https://pckolik.com.tr"
 PRODUCT_SEL = ".product-card"
 
 
 def _parse_price(card) -> float:
-    # PCKolik'te fiyat .price icinde: "26.999,00TL" veya .price-new icinde
-    selectors = [".price-new", ".price", ".current-price", ".product-price", ".price-box"]
     raw = ""
-    for sel in selectors:
+    for sel in (".price-new", ".price", ".current-price", ".product-price", ".price-box"):
         el = card.css(sel).first
         if el:
             raw = el.get_all_text().strip()
             if raw:
                 break
-
     if not raw:
-        all_text = card.get_all_text()
-        match = re.search(r"(\d[\d\.]*(?:,\d+)?)\s*(?:TL|₺)", all_text)
+        match = re.search(r"(\d[\d.]*(?:,\d+)?)\s*(?:TL|₺)", card.get_all_text())
         if match:
             raw = match.group(1)
-
     if not raw:
         return 0.0
-
     clean = re.sub(r"[^\d,.]", "", raw)
     if "." in clean and "," in clean:
         clean = clean.replace(".", "").replace(",", ".")
     elif "," in clean:
         clean = clean.replace(",", ".")
-
     try:
         return float(clean)
     except ValueError:
@@ -52,44 +49,35 @@ def _parse_page_products(page) -> list[dict]:
     products = []
     if not page:
         return products
-
     for card in page.css(PRODUCT_SEL):
-        # Link check
         a_el = card.css("a.name").first or card.css("a").first
         href = a_el.attrib.get("href", "") if a_el else ""
         if not href or "javascript" in href.lower():
             continue
-
-        if href and not href.startswith("http"):
+        if not href.startswith("http"):
             href = f"{SITE_BASE}{'/' if not href.startswith('/') else ''}{href}"
 
-        # Name
         name = "N/A"
-        for name_sel in [".name", "a.name", "a.product-name", ".product-title", ".product-name", "h2", "h3"]:
-            name_el = card.css(name_sel).first
+        for sel in (".name", "a.name", "a.product-name", ".product-title", ".product-name", "h2", "h3"):
+            name_el = card.css(sel).first
             if name_el:
                 name = name_el.get_all_text().strip()
                 if name and name != "N/A":
-                    name = name.split('\n')[0].strip()
+                    name = name.split("\n")[0].strip()
                     break
-        
-        # Price extraction
+
         price = _parse_price(card)
 
-        # Image
         image = None
         for img in card.css("img"):
             src = img.attrib.get("src") or ""
-            if not src or src.startswith("/assets/"):
-                continue
-            if src.endswith(".svg") or src.endswith(".gif"):
-                continue
-            if "icon" in src.lower():
+            if not src or src.startswith("/assets/") or src.endswith((".svg", ".gif")) or "icon" in src.lower():
                 continue
             image = f"{SITE_BASE}{src}" if src.startswith("/") else src
             break
 
-        features = [(li.get_all_text() if hasattr(li, 'get_all_text') else li.text).strip() for li in card.css("li")]
+        features = [(li.get_all_text() if hasattr(li, "get_all_text") else li.text).strip()
+                    for li in card.css("li")]
         specs = extract_specs_from_list(features)
 
         if name and name != "N/A":
@@ -98,25 +86,11 @@ def _parse_page_products(page) -> list[dict]:
                 if v == "N/A" and name_specs.get(k) != "N/A":
                     specs[k] = name_specs[k]
 
-        products.append({
-            "name": name,
-            "price": price,
-            "image": image,
-            "url": href,
-            "store": STORE,
-            "specs": specs,
-        })
-
+        products.append({"name": name, "price": price, "image": image, "url": href, "store": STORE, "specs": specs})
     return products
 
 
 def _parse_detail_image(page) -> str | None:
-    """Detail sayfasindaki kasa urun gorselini dondurur.
-
-    pckolik listing'inde bileşen (PSU/MB/RAM) görselleri gösterilir; gercek
-    sistem/kasa gorseli yalnizca detay sayfasinda ``.case-img-crop img`` icinde
-    bulunur.
-    """
     if not page:
         return None
     for sel in (".case-img-crop img", ".case-img img", "img.case-img",
@@ -130,16 +104,9 @@ def _parse_detail_image(page) -> str | None:
 
 
 async def _fetch_product_details(product: dict, fetcher, cache=None) -> dict:
-    """Detail'den kasa gorselini cek, listing gorselinin uzerine yaz.
-
-    Image cache'lenir (URL kararli).  Eksik spec'ler de detail'den
-    extract_specs_from_list ile doldurulur (pckolik detail'de spec table yok,
-    ama oylesine bir fallback birakildi).
-    """
     url = product.get("url")
     if not url:
         return product
-
     if cache is not None and url in cache:
         cached = cache[url]
         if cached.get("image"):
@@ -168,53 +135,49 @@ async def _fetch_product_details(product: dict, fetcher, cache=None) -> dict:
                 image = f"{SITE_BASE}{image}"
             product["image"] = image
         if cache is not None:
-            cache[url] = {
-                "image": image,
-                "specs": cacheable_specs(product["specs"]),
-            }
+            cache[url] = {"image": image, "specs": cacheable_specs(product["specs"])}
         break
     return product
 
 
 async def scrape_all_pages_async() -> list[dict]:
-    print(f"[PCKolik] Ilk sayfa yukleniyor: {BASE_URL}", flush=True)
+    print(f"[PCKolik] Çekiliyor: {BASE_URL}", flush=True)
     fetcher = Fetcher()
 
     def fetch_sync(url):
         try:
             return fetcher.get(url)
         except Exception as e:
-            print(f"[PCKolik] Fetch hatasi: {e}", flush=True)
+            print(f"[PCKolik] Hata: {e}", flush=True)
             return None
 
     first_page = await asyncio.to_thread(fetch_sync, BASE_URL)
     if not first_page:
-        print("[PCKolik] Ilk sayfa yuklenemedi", flush=True)
+        print("[PCKolik] İlk sayfa çekilemedi", flush=True)
         return []
 
     try:
-        nums = [int(a.text.strip()) for a in first_page.css(".pagination a, .page-link") if a.text.strip().isdigit()]
+        nums        = [int(a.text.strip()) for a in first_page.css(".pagination a, .page-link") if a.text.strip().isdigit()]
         total_pages = max(nums) if nums else 1
     except Exception:
         total_pages = 1
 
     print(f"[PCKolik] {total_pages} sayfa bulundu", flush=True)
     all_products = _parse_page_products(first_page)
-    seen_urls = {p["url"] for p in all_products if p.get("url")}
-    print(f"[PCKolik] Sayfa 1: {len(all_products)} urun", flush=True)
+    seen_urls    = {p["url"] for p in all_products if p.get("url")}
+    print(f"[PCKolik] Sayfa 1: {len(all_products)} ürün", flush=True)
 
     if total_pages > 1:
         sem = asyncio.Semaphore(2)
 
         async def fetch_n(n):
-            url = f"{BASE_URL}?page={n}"
             async with sem:
                 for attempt in range(3):
                     try:
-                        page = await asyncio.to_thread(fetch_sync, url)
+                        page     = await asyncio.to_thread(fetch_sync, f"{BASE_URL}?page={n}")
                         products = _parse_page_products(page)
                         if products:
-                            print(f"[PCKolik] Sayfa {n}: {len(products)} urun", flush=True)
+                            print(f"[PCKolik] Sayfa {n}: {len(products)} ürün", flush=True)
                             return products
                     except Exception as e:
                         print(f"[PCKolik] Sayfa {n} hata (deneme {attempt+1}): {e}", flush=True)
@@ -229,13 +192,10 @@ async def scrape_all_pages_async() -> list[dict]:
                         seen_urls.add(p["url"])
                         all_products.append(p)
 
-    print(f"[PCKolik] Toplam {len(all_products)} urun cekildi", flush=True)
-
-    # Detay cekimi: listing gorselleri bileşen, kasa gorseli detayda.
-    cache = load_detail_cache()
+    print(f"[PCKolik] {len(all_products)} ürün için detay çekiliyor...", flush=True)
+    cache  = load_detail_cache()
     cached = sum(1 for p in all_products if p.get("url") in cache)
-    print(f"[PCKolik] {len(all_products)} urun icin kasa gorseli cekiliyor "
-          f"({cached} onbellekten)...", flush=True)
+    print(f"[PCKolik] {cached} ürün önbellekte", flush=True)
 
     sem = asyncio.Semaphore(8)
 
@@ -249,8 +209,7 @@ async def scrape_all_pages_async() -> list[dict]:
 
     all_products = await asyncio.gather(*[fetch_detail_with_sem(p) for p in all_products])
     save_detail_cache(cache)
-
-    print(f"[PCKolik] Detay cekimi tamamlandi", flush=True)
+    print(f"[PCKolik] Tamamlandı — {len(all_products)} ürün", flush=True)
     return all_products
 
 
@@ -261,7 +220,4 @@ def scrape_all_pages() -> list[dict]:
 if __name__ == "__main__":
     import json
     products = scrape_all_pages()
-    print(f"Bitti: {len(products)} urun.")
-
-
-
+    print(f"Toplam: {len(products)} ürün")
